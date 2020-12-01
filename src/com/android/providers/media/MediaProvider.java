@@ -1038,7 +1038,8 @@ public class MediaProvider extends ContentProvider {
                 + "group_id INTEGER DEFAULT NULL,primary_directory TEXT DEFAULT NULL,"
                 + "secondary_directory TEXT DEFAULT NULL,document_id TEXT DEFAULT NULL,"
                 + "instance_id TEXT DEFAULT NULL,original_document_id TEXT DEFAULT NULL,"
-                + "relative_path TEXT DEFAULT NULL,volume_name TEXT DEFAULT NULL)");
+                + "relative_path TEXT DEFAULT NULL,volume_name TEXT DEFAULT NULL,"
+                + "in_white_list INTEGER DEFAULT 0)");
 
         db.execSQL("CREATE TABLE log (time DATETIME, message TEXT)");
         if (!internal) {
@@ -1850,6 +1851,16 @@ public class MediaProvider extends ContentProvider {
             }
         }
 
+        /// TODO: Very bad approach but I'm in rush ...
+
+        if (table == FILES) {
+            String callingPackage = getCallingPackage();
+
+            if (callingPackage != null && !callingPackage.contains("com.android.gallery3d")) {
+                selection += " AND in_white_list = 1 ";
+            }
+        }
+
         final String having = null;
         final Cursor c = qb.query(db, projection,
                 selection, selectionArgs, groupBy, having, sortOrder, limit, signal);
@@ -2505,6 +2516,7 @@ public class MediaProvider extends ContentProvider {
         switch (mediaType) {
             case FileColumns.MEDIA_TYPE_IMAGE: {
                 values.put(MediaStore.MediaColumns.DATE_ADDED, System.currentTimeMillis() / 1000);
+                values.put("in_white_list", 0);
                 break;
             }
 
@@ -4493,6 +4505,7 @@ public class MediaProvider extends ContentProvider {
             String[] userWhereArgs) {
         // Limit the hacky workaround to camera targeting Q and below, to allow newer versions
         // of camera that does the right thing to work correctly.
+
         if ("com.google.android.GoogleCamera".equals(getCallingPackageOrSelf())
                 && getCallingPackageTargetSdkVersion() <= Build.VERSION_CODES.Q) {
             if (matchUri(uri, false) == IMAGES_MEDIA_ID) {
@@ -6321,6 +6334,7 @@ public class MediaProvider extends ContentProvider {
 
         sMutableColumns.add(MediaStore.Files.FileColumns.MIME_TYPE);
         sMutableColumns.add(MediaStore.Files.FileColumns.MEDIA_TYPE);
+        sMutableColumns.add("in_white_list");
     }
 
     /**
