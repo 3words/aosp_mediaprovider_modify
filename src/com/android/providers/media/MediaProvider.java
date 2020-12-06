@@ -281,6 +281,10 @@ public class MediaProvider extends ContentProvider {
     private PackageManager mPackageManager;
 
     private Size mThumbSize;
+    private static final String IN_WHITE_LIST_FIELD = "in_white_list";
+    private static final String WHITE_LIST_TABLE = "white_list";
+    private static final String WHITE_LIST_SETTINGS_TABLE = "white_list_settings";
+    private static final String SHOW_WHITE_LIST_ONLY_COLUMN = "show_only_white_list";
 
     /**
      * Map from UID to cached {@link LocalCallingIdentity}. Values are only
@@ -1038,10 +1042,13 @@ public class MediaProvider extends ContentProvider {
                 + "group_id INTEGER DEFAULT NULL,primary_directory TEXT DEFAULT NULL,"
                 + "secondary_directory TEXT DEFAULT NULL,document_id TEXT DEFAULT NULL,"
                 + "instance_id TEXT DEFAULT NULL,original_document_id TEXT DEFAULT NULL,"
-                + "relative_path TEXT DEFAULT NULL,volume_name TEXT DEFAULT NULL,"
-                + "in_white_list INTEGER DEFAULT 0)");
+                + "relative_path TEXT DEFAULT NULL,volume_name TEXT DEFAULT NULL)");
 
         db.execSQL("CREATE TABLE log (time DATETIME, message TEXT)");
+        db.execSQL("CREATE TABLE white_list (_id INTEGER PRIMARY KEY)");
+        db.execSQL("CREATE TABLE white_list_settings (_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + " show_only_white_list INTEGER DEFAULT 0)");
+
         if (!internal) {
             db.execSQL("CREATE TABLE audio_genres (_id INTEGER PRIMARY KEY,name TEXT NOT NULL)");
             db.execSQL("CREATE TABLE audio_genres_map (_id INTEGER PRIMARY KEY,"
@@ -1851,26 +1858,55 @@ public class MediaProvider extends ContentProvider {
             }
         }
 
-        /// TODO: Very bad approach but I'm in rush ...
+        Log.d(TAG, "useWhiteListOnly " + useWhiteListOnly(db));
+        Log.d(TAG, "selection " + selection);
 
-        if (table == FILES) {
-            String callingPackage = getCallingPackage();
+        StringBuilder selectionBuilder = new StringBuilder(selection == null ? "" : selection);
+        ArrayList<String> selectionArgArray = selectionArgs == null ?
+                new ArrayList<>() : new ArrayList<>(Arrays.asList(selectionArgs));
+        boolean doQuery = true;
 
-            if (callingPackage != null && !callingPackage.contains("com.android.gallery3d")) {
-                selection += " AND in_white_list = 1 ";
+        if (useWhiteListOnly(db)) {
+            Cursor cursor = whiteListedIds(db);
+            Log.d(TAG, DatabaseUtils.dumpCursorToString(cursor));
+
+            if (cursor != null) {
+                if (cursor.getCount() > 0) {
+                    int index = 0;
+
+                    while (cursor.moveToNext()) {
+                        String id = String.valueOf(cursor.getInt(index++));
+                        selectionArgArray.add(id);
+
+                        if (!selectionBuilder.toString().isEmpty()) {
+                            selectionBuilder.append(" AND ");
+                        }
+
+                        selectionBuilder.append(" _id = ? ");
+                    }
+                } else {
+                    doQuery = false;
+                }
+
+                cursor.close();
+                cursor = null;
             }
         }
 
+        Log.d(TAG, "selection " + selectionBuilder.toString());
+
         final String having = null;
         final Cursor c = qb.query(db, projection,
-                selection, selectionArgs, groupBy, having, sortOrder, limit, signal);
+                selectionBuilder.toString().isEmpty() ? null : selectionBuilder.toString(),
+                selectionArgArray.toArray(new String[selectionArgArray.size()]),
+                groupBy, having, sortOrder, limit, signal);
 
         if (c != null) {
             ((AbstractCursor) c).setNotificationUris(getContext().getContentResolver(),
                     Arrays.asList(uri), UserHandle.myUserId(), false);
         }
 
-        return c;
+        return doQuery ? c : null;
     }
 
     @Override
@@ -2516,7 +2552,6 @@ public class MediaProvider extends ContentProvider {
         switch (mediaType) {
             case FileColumns.MEDIA_TYPE_IMAGE: {
                 values.put(MediaStore.MediaColumns.DATE_ADDED, System.currentTimeMillis() / 1000);
-                values.put("in_white_list", 0);
                 break;
             }
 
@@ -4585,6 +4620,23 @@ public class MediaProvider extends ContentProvider {
                 // apps, since any edits here don't reflect the metadata on
                 // disk, and they'd be overwritten during a rescan.
                 for (String column : new ArraySet<>(initialValues.keySet())) {
+                    Log.d(TAG, "column " + column);
+                    if (column.equalsIgnoreCase(IN_WHITE_LIST_FIELD)) {
+                        Long currentId = Long.valueOf(uri.getLastPathSegment());
+                        Log.d(TAG, "currentId " + currentId);
+                        Log.d(TAG, "in_white_list " +
+                                initialValues.getAsBoolean(IN_WHITE_LIST_FIELD));
+                        setIdWhiteListed(db, initialValues.getAsBoolean(IN_WHITE_LIST_FIELD),
+                                currentId);
+                        return 1;
+                    } else if (column.equalsIgnoreCase(SHOW_WHITE_LIST_ONLY_COLUMN)) {
+                        Log.d(TAG, "show_only_white_list "
+                                + initialValues.getAsBoolean(SHOW_WHITE_LIST_ONLY_COLUMN));
+                        setUseWhiteListOnly(db,
+                                initialValues.getAsBoolean(SHOW_WHITE_LIST_ONLY_COLUMN));
+                        return 1;
+                    }
+
                     if (sMutableColumns.contains(column)) {
                         // Mutation normally allowed
                     } else if (isPending.get()) {
@@ -6334,7 +6386,6 @@ public class MediaProvider extends ContentProvider {
 
         sMutableColumns.add(MediaStore.Files.FileColumns.MIME_TYPE);
         sMutableColumns.add(MediaStore.Files.FileColumns.MEDIA_TYPE);
-        sMutableColumns.add("in_white_list");
     }
 
     /**
@@ -6623,5 +6674,49 @@ public class MediaProvider extends ContentProvider {
             }
         }
         return s.toString();
+    }
+
+    private boolean useWhiteListOnly(SQLiteDatabase db) {
+        Cursor c = null;
+
+        try {
+             c = db.rawQuery("SELECT * FROM " + WHITE_LIST_SETTINGS_TABLE + " WHERE _id=1",
+                     null);
+
+             if (c != null && c.moveToFirst()) {
+                return c.getInt(1) == 1;
+             }
+        } finally {
+            if (c != null) {
+                c.close();
+                c = null;
+            }
+        }
+
+        return false;
+    }
+
+    private void setUseWhiteListOnly(SQLiteDatabase db, boolean use) {
+        int whiteListOnly = use ? 1 : 0;
+
+        db.execSQL("INSERT OR REPLACE INTO " + WHITE_LIST_SETTINGS_TABLE
+                + " (_id," + SHOW_WHITE_LIST_ONLY_COLUMN + ") "
+                + "VALUES(1," + whiteListOnly + ")");
+    }
+
+    private void setIdWhiteListed(SQLiteDatabase db, boolean whiteListed, Long id) {
+        if (whiteListed) {
+            Log.d(TAG, "put to white list resource with id " + id);
+            db.execSQL("INSERT OR REPLACE INTO " + WHITE_LIST_TABLE
+                    + " (_id) VALUES(" + id + ")");
+        } else {
+            Log.d(TAG, "remove from white list resource with id " + id);
+            db.execSQL("DELETE FROM " + WHITE_LIST_TABLE
+                    + " WHERE _id =" + id);
+        }
+    }
+
+    private Cursor whiteListedIds(SQLiteDatabase db) {
+        return db.rawQuery("SELECT * FROM " + WHITE_LIST_TABLE, null);
     }
 }
